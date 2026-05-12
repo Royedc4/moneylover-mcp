@@ -426,7 +426,12 @@ const registerMoneyloverTools = server => {
         with: z
           .array(z.string())
           .optional()
-          .describe('Optional array of related parties')
+          .describe('Optional array of related parties'),
+        campaignId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Optional campaign/event identifier to associate with the transaction')
       }
     },
     async ({ token, ...payload }) => {
@@ -438,7 +443,8 @@ const registerMoneyloverTools = server => {
             amount: payload.amount,
             note: payload.note,
             date: payload.date,
-            with: payload.with
+            with: payload.with,
+            campaignId: payload.campaignId
           })
         );
         return formatSuccess(data ?? {});
