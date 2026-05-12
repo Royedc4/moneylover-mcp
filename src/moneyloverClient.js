@@ -158,6 +158,11 @@ export class MoneyloverClient {
       displayDate: ensureDateString(params.date ?? params.Date)
     };
 
+    const campaignId = params.campaignId ?? params.CampaignID ?? params.campaign;
+    if (typeof campaignId === 'string' && campaignId.trim() !== '') {
+      payload.event = campaignId.trim();
+    }
+
     return this.#post('/transaction/add', {
       body: JSON.stringify(payload),
       headers: { 'Content-Type': 'application/json' }
