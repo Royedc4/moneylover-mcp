@@ -132,6 +132,56 @@ export class MoneyloverClient {
     });
   }
 
+  // Keyed by walletId. /category/list returns wallet-local IDs that the
+  // transaction/add endpoint rejects with HTTP 524. The only IDs that work
+  // are the global ones embedded in existing transactions. This method
+  // discovers and caches them for the session.
+  #categoryGlobalCache = new Map();
+  #CATEGORY_CACHE_TTL_MS = 5 * 60 * 1000;
+
+  async getCategoryGlobalIds(walletId) {
+    const wid = ensureString(walletId, 'walletId');
+    const cached = this.#categoryGlobalCache.get(wid);
+    if (cached && Date.now() - cached.fetchedAt < this.#CATEGORY_CACHE_TTL_MS) {
+      return cached.categories;
+    }
+
+    const endDate = new Date().toISOString().slice(0, 10);
+    const data = await this.getTransactions(wid, '2020-01-01', endDate);
+    const txs = data?.transactions ?? [];
+
+    const seen = new Map();
+    for (const tx of txs) {
+      const cat = tx.category;
+      if (!cat?._id) continue;
+      if (!seen.has(cat._id)) {
+        seen.set(cat._id, {
+          _id: cat._id,
+          name: cat.name,
+          type: cat.type,
+          icon: cat.icon ?? null,
+          parent: cat.parent
+            ? { _id: cat.parent._id, name: cat.parent.name, type: cat.parent.type }
+            : null
+        });
+      }
+      const par = cat.parent;
+      if (par?._id && !seen.has(par._id)) {
+        seen.set(par._id, {
+          _id: par._id,
+          name: par.name,
+          type: par.type,
+          icon: par.icon ?? null,
+          parent: null
+        });
+      }
+    }
+
+    const categories = [...seen.values()];
+    this.#categoryGlobalCache.set(wid, { fetchedAt: Date.now(), categories });
+    return categories;
+  }
+
   async getTransactions(walletId, startDate, endDate) {
     const payload = {
       walletId: ensureString(walletId, 'walletId'),
@@ -167,6 +217,106 @@ export class MoneyloverClient {
       body: JSON.stringify(payload),
       headers: { 'Content-Type': 'application/json' }
     });
+  }
+
+  // /transaction/edit is a full replace, not a patch: every field the web app
+  // sends has to be present or the server blanks it. Callers pass only what
+  // changes; we merge over the current record fetched from /transaction/list.
+  // Note the asymmetry with /transaction/add — there amount is a string, here
+  // the web client sends it as a number.
+  async editTransaction(params) {
+    if (!params || typeof params !== 'object') {
+      throw new Error('params is required');
+    }
+
+    const id = ensureString(params.transactionId ?? params._id, 'transactionId');
+    const current = params.current ?? (await this.#findTransaction(id, params.walletId));
+
+    const pick = (next, prev, fallback) => (next !== undefined ? next : prev !== undefined ? prev : fallback);
+
+    const payload = {
+      _id: id,
+      with: Array.isArray(params.with) ? params.with : current?.with ?? [],
+      account: ensureString(params.walletId ?? current?.account?._id ?? current?.account, 'walletId'),
+      category: ensureString(params.categoryId ?? current?.category?._id, 'categoryId'),
+      amount: Number(pick(params.amount, current?.amount)),
+      note: pick(params.note, current?.note, ''),
+      displayDate: ensureDateString(
+        params.date ?? (current?.displayDate ? String(current.displayDate).slice(0, 10) : undefined)
+      ),
+      event: pick(params.campaignId, current?.campaign?.[0]?._id, ''),
+      exclude_report: Boolean(pick(params.excludeReport, current?.exclude_report, false)),
+      longtitude: Number(pick(params.longitude, current?.longtitude, 0)),
+      latitude: Number(pick(params.latitude, current?.latitude, 0)),
+      addressName: pick(params.addressName, current?.addressName, ''),
+      addressDetails: pick(params.addressDetails, current?.addressDetails, ''),
+      addressIcon: pick(params.addressIcon, current?.addressIcon, ''),
+      image: pick(params.image, current?.image, '')
+    };
+
+    if (!Number.isFinite(payload.amount)) {
+      throw new Error('amount is required and must be numeric');
+    }
+
+    return this.#post('/transaction/edit', {
+      body: JSON.stringify(payload),
+      headers: { 'Content-Type': 'application/json', dataformat: 'json' }
+    });
+  }
+
+  // delRelated controls the transfer twin: a transfer is two linked records
+  // (see getRelatedTransactions), and deleting one leg with delRelated=false
+  // leaves the other stranded, silently desyncing the two wallets.
+  async deleteTransaction(transactionId, { deleteRelated = false } = {}) {
+    const payload = {
+      _id: ensureString(transactionId, 'transactionId'),
+      delRelated: Boolean(deleteRelated)
+    };
+
+    return this.#post('/transaction/delete', {
+      body: JSON.stringify(payload),
+      headers: { 'Content-Type': 'application/json', dataformat: 'json' }
+    });
+  }
+
+  // Returns the opposite leg(s) of a transfer. Takes an ARRAY under `ids` —
+  // passing `_id` instead yields error 706 "Not authorized", which is a
+  // malformed-payload response, not a real auth failure.
+  async getRelatedTransactions(transactionIds) {
+    const ids = (Array.isArray(transactionIds) ? transactionIds : [transactionIds]).map((id, index) =>
+      ensureString(id, `transactionIds[${index}]`)
+    );
+    if (ids.length === 0) {
+      throw new Error('transactionIds is required');
+    }
+
+    return this.#post('/transaction/related', {
+      body: JSON.stringify({ ids }),
+      headers: { 'Content-Type': 'application/json', dataformat: 'json' }
+    });
+  }
+
+  // /transaction/list is the only read path, so locating one record means
+  // scanning a window around it. Widened progressively to keep the common
+  // case (a recent transaction) cheap.
+  async #findTransaction(transactionId, walletId) {
+    if (!walletId) {
+      throw new Error('walletId is required when the current transaction is not supplied');
+    }
+    const wid = ensureString(walletId, 'walletId');
+    const today = new Date();
+    const end = new Date(today.getFullYear() + 1, 11, 31).toISOString().slice(0, 10);
+
+    for (const yearsBack of [1, 5, 20]) {
+      const start = new Date(today.getFullYear() - yearsBack, 0, 1).toISOString().slice(0, 10);
+      const data = await this.getTransactions(wid, start, end);
+      const found = (data?.transactions ?? []).find(tx => tx._id === transactionId);
+      if (found) {
+        return found;
+      }
+    }
+
+    throw new Error(`Transaction ${transactionId} not found in wallet ${wid}`);
   }
 
   async #post(path, { body, headers } = {}) {

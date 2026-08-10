@@ -66,8 +66,34 @@ The server registers the following tools:
 | `get_categories` | Lists categories for a wallet. | `token`, `walletId` |
 | `get_transactions` | Retrieves transactions in a date range. | `token`, `walletId`, `startDate`, `endDate` |
 | `add_transaction` | Creates a new transaction. | `token`, `walletId`, `categoryId`, `amount`, `date` (YYYY-MM-DD); optional `note`, `with` |
+| `edit_transaction` | Updates an existing transaction. Only the fields you pass change. | `token`, `transactionId`, `walletId`; optional `categoryId`, `amount`, `note`, `date`, `excludeReport`, `with`, `campaignId` |
+| `delete_transaction` | Permanently deletes a transaction. | `token`, `transactionId`, `confirm: true`; optional `deleteRelated` |
+| `get_related_transactions` | Returns the opposite leg(s) of transfers. | `token`, `transactionIds` (array) |
 
 Tokens are not persisted; provide them explicitly when invoking tools other than `login`.
+
+### Working with transfers
+
+A transfer is **two linked records**, not one: an *Outgoing transfer* in the source wallet and an
+*Incoming transfer* in the destination, each pointing at the other via `related`. The write tools act
+on a single record, so:
+
+- **Editing** one leg does not touch its twin. Change an amount on one side only and the two wallets
+  silently disagree. Call `get_related_transactions` first, then edit both legs.
+- **Deleting** one leg strands the other unless you pass `deleteRelated: true`.
+
+`delete_transaction` additionally requires `confirm: true` — there is no undo.
+
+### Endpoint notes
+
+Quirks of the upstream API that the client normalizes, recorded so they are not rediscovered:
+
+- `/transaction/edit` is a **full replace**, not a patch — every field must be present or the server
+  blanks it. `edit_transaction` reads the current record and merges your changes over it.
+- `amount` is a **string** on `/transaction/add` but a **number** on `/transaction/edit`.
+- `/transaction/related` takes `{ "ids": [...] }`. Sending `{ "_id": "..." }` returns error `706
+  "Not authorized error"`, which is a malformed-payload response rather than a real auth failure.
+- Category IDs must be the **global** ones from `get_categories`; wallet-local IDs are rejected.
 
 ## Library Usage
 

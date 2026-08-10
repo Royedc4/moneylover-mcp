@@ -361,7 +361,8 @@ const registerMoneyloverTools = server => {
     'get_categories',
     {
       title: 'Get Categories',
-      description: 'Retrieve categories for a specific wallet.',
+      description:
+        'Retrieve categories for a specific wallet. Returns the global category IDs that are accepted by add_transaction. IDs are discovered from transaction history and cached for 5 minutes.',
       inputSchema: {
         ...tokenArgument,
         walletId: z.string().min(1).describe('Wallet identifier')
@@ -372,8 +373,8 @@ const registerMoneyloverTools = server => {
     },
     async ({ token, walletId }) => {
       try {
-        const data = (await runWithClient(token, client => client.getCategories(walletId))) ?? [];
-        return formatSuccess({ categories: data });
+        const categories = await runWithClient(token, client => client.getCategoryGlobalIds(walletId));
+        return formatSuccess({ categories });
       } catch (error) {
         return formatError(error instanceof Error ? error : new Error(String(error)));
       }
@@ -416,7 +417,7 @@ const registerMoneyloverTools = server => {
       inputSchema: {
         ...tokenArgument,
         walletId: z.string().min(1).describe('Wallet identifier'),
-        categoryId: z.string().min(1).describe('Category identifier'),
+        categoryId: z.string().min(1).describe('Category identifier — must be a global ID from get_categories, not a wallet-local ID'),
         amount: z.string().min(1).describe('Transaction amount as string'),
         note: z.string().optional().describe('Optional transaction note'),
         date: z
@@ -447,6 +448,100 @@ const registerMoneyloverTools = server => {
             campaignId: payload.campaignId
           })
         );
+        return formatSuccess(data ?? {});
+      } catch (error) {
+        return formatError(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+  );
+
+  server.registerTool(
+    'edit_transaction',
+    {
+      title: 'Edit Transaction',
+      description:
+        'Update an existing transaction. Only the fields you pass change; the rest are read from the current record. Editing one leg of a transfer does NOT update its twin — use get_related_transactions first.',
+      inputSchema: {
+        ...tokenArgument,
+        transactionId: z.string().min(1).describe('Transaction _id to update'),
+        walletId: z.string().min(1).describe('Wallet identifier the transaction belongs to'),
+        categoryId: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('New category — must be a global ID from get_categories'),
+        amount: z.number().optional().describe('New amount (numeric, unlike add_transaction)'),
+        note: z.string().optional().describe('New note'),
+        date: z
+          .string()
+          .regex(/\d{4}-\d{2}-\d{2}/)
+          .optional()
+          .describe('New display date in YYYY-MM-DD format'),
+        excludeReport: z.boolean().optional().describe('Exclude this transaction from reports'),
+        with: z.array(z.string()).optional().describe('Related parties'),
+        campaignId: z.string().optional().describe('Campaign/event identifier ("" clears it)')
+      }
+    },
+    async ({ token, ...payload }) => {
+      try {
+        const data = await runWithClient(token, client => client.editTransaction(payload));
+        return formatSuccess(data ?? {});
+      } catch (error) {
+        return formatError(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+  );
+
+  server.registerTool(
+    'delete_transaction',
+    {
+      title: 'Delete Transaction',
+      description:
+        'Permanently delete a transaction. Irreversible — requires confirm: true. For a transfer, set deleteRelated: true or the opposite leg is left stranded and the two wallets desync.',
+      inputSchema: {
+        ...tokenArgument,
+        transactionId: z.string().min(1).describe('Transaction _id to delete'),
+        deleteRelated: z
+          .boolean()
+          .optional()
+          .describe('Also delete the linked transfer leg in the other wallet (default false)'),
+        confirm: z
+          .boolean()
+          .describe('Must be true. Guards against accidental deletion — there is no undo.')
+      }
+    },
+    async ({ token, transactionId, deleteRelated, confirm }) => {
+      try {
+        if (confirm !== true) {
+          throw new Error('Refusing to delete: pass confirm: true to acknowledge this cannot be undone');
+        }
+        const data = await runWithClient(token, client =>
+          client.deleteTransaction(transactionId, { deleteRelated })
+        );
+        return formatSuccess(data ?? {});
+      } catch (error) {
+        return formatError(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+  );
+
+  server.registerTool(
+    'get_related_transactions',
+    {
+      title: 'Get Related Transactions',
+      description:
+        'Fetch the opposite leg(s) of transfers. A transfer is two linked records — an outgoing one in the source wallet and an incoming one in the destination. Call this before editing or deleting a transfer.',
+      inputSchema: {
+        ...tokenArgument,
+        transactionIds: z
+          .array(z.string().min(1))
+          .min(1)
+          .describe('One or more transaction _ids to look up twins for')
+      }
+    },
+    async ({ token, transactionIds }) => {
+      try {
+        const data = await runWithClient(token, client => client.getRelatedTransactions(transactionIds));
         return formatSuccess(data ?? {});
       } catch (error) {
         return formatError(error instanceof Error ? error : new Error(String(error)));
